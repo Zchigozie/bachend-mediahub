@@ -1,1 +1,89 @@
-name: ok
+name: CI/CD Pipeline
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    name: Provision & Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+     - name: Checkout Code
+       uses: actions/checkout@v4
+
+     - name: Configure AWS Credentials
+       uses: aws-actions/configure-aws-credentials@v4
+       with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: us-east-1
+
+     - name: Setup Terraform
+       uses: hashicorp/setup-terraform@v3
+
+     -  name: Terraform Init
+        working-directory: ./terraform
+        run: terraform init
+
+     -  name: Terraform Apply
+        working-directory: ./terraform
+        run: terraform apply -auto-approve
+
+     -  name: Get EC2 Public IP
+        id: tf_output
+        working-directory: ./terraform
+        run: |
+          EC2_IP=$(terraform output -raw public_ip)
+          echo "EC2_IP=$EC2_IP" >> $GITHUB_ENV
+
+     -  name: Deploy Application via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          CLOUD_NAME: ${{ secrets.CLOUD_NAME }}
+          CLOUD_API_KEY: ${{ secrets.CLOUD_API_KEY }}
+          CLOUD_API_SECRET: ${{ secrets.CLOUD_API_SECRET }}
+          PORT: 3000
+          CORS_ORIGINS: "http://localhost:4000, http://localhost:3000"
+          NODE_ENV: development
+          FRONTEND_URI: "http://localhost:5173"
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          MONGO_URI: ${{ secrets.MONGO_URI }}
+        with:
+          host: ${{ env.EC2_IP }}
+          username: ubuntu
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          envs: CLOUD_NAME,CLOUD_API_KEY,CLOUD_API_SECRET,PORT,CORS_ORIGINS,NODE_ENV,FRONTEND_URI,RESEND_API_KEY,JWT_SECRET,MONGO_URI
+          script: |
+            # Create project directory and clone if it doesn't exist
+            if [ ! -d "/home/ubuntu/bachend-mediahub" ]; then
+              git clone https://github.com/Zchigozie/bachend-mediahub.git /home/ubuntu/bachend-mediahub
+            fi
+            
+            cd /home/ubuntu/bachend-mediahub
+            
+            # Pull latest changes
+            git fetch origin main
+            git reset --hard origin/main
+            
+            # Generate the .env file dynamically
+            cat <<EOT > .env
+            CLOUD_NAME=$CLOUD_NAME
+            CLOUD_API_KEY=$CLOUD_API_KEY
+            CLOUD_API_SECRET=$CLOUD_API_SECRET
+            PORT=$PORT
+            CORS_ORIGINS=$CORS_ORIGINS
+            NODE_ENV=$NODE_ENV
+            FRONTEND_URI=$FRONTEND_URI
+            RESEND_API_KEY=$RESEND_API_KEY
+            JWT_SECRET=$JWT_SECRET
+            MONGO_URI=$MONGO_URI
+            EOT
+            
+            # Install dependencies and restart the service
+            npm install
+            
+            # Restart PM2 or start it if it isn't running yet
+            pm2 restart mediahub || pm2 start index.js --name "mediahub"
